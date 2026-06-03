@@ -17,6 +17,6 @@ for file in files:
         avg_calc_time += calc_time 
     avg_run_time /= stats
     avg_calc_time /= stats
-    print("Average run time: ", avg_run_time * 1e3, " ms\n",
-          "Average calc time: ", avg_calc_time, " ms\n",
-          "Number of events:", n)
+    print("  Average run time: ", avg_run_time * 1e3, " ms",
+          "\n  Average calc time: ", avg_calc_time, " ms",
+          "\n  Number of events:", n)
