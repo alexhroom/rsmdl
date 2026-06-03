@@ -17,7 +17,7 @@ type PyHist<'py> = Bound<'py, PyArray3<usize>>;
 fn calc_histogram<'py>(py: Python<'py>, file: String) -> PyResult<(PyHist<'py>, usize, u128)> {
     let chunk_size: usize = 1048576;
 
-    // load file, measuring time taken...
+    // load file
     let path = Path::new(&file);
     let data = load_data(&path, chunk_size).expect("Failed to load data!");
 
@@ -28,7 +28,6 @@ fn calc_histogram<'py>(py: Python<'py>, file: String) -> PyResult<(PyHist<'py>, 
     let periods = Array1::<usize>::zeros(data.n_events);
     let weight = Array1::<usize>::ones(data.n_events);
 
-    // calculate histograms `stats` times
     let (result, time) = calculate_histograms(
         data,
         n_specs,
@@ -58,12 +57,12 @@ fn calculate_histograms(
             let array_slice = s![start..end];
             unsafe {
             make_histogram(
-            dataset.times
-                .read_slice_1d(array_slice)
-                .expect("Failed to read times."),
-            dataset.specs
-                .read_slice_1d(array_slice)
-                .expect("Failed to read specs."),
+                dataset.times
+                    .read_slice_1d(array_slice)
+                    .expect("Failed to read times."),
+                dataset.specs
+                    .read_slice_1d(array_slice)
+                    .expect("Failed to read specs."),
                 n_specs,
                 &periods.slice(array_slice),
                 n_periods,
@@ -78,7 +77,11 @@ fn calculate_histograms(
 
     let final_result = results
         .into_iter()
-        .reduce(|acc, r| HistogramResult{hist: acc.hist + r.hist, n: acc.n + r.n})
+        .reduce(|mut acc, r| {
+            acc.hist += &r.hist;
+            acc.n += &r.n;
+            acc
+        })
         .unwrap();
 
     (final_result, time.elapsed())
