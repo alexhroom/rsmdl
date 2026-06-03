@@ -1,30 +1,20 @@
 use std::cmp::min;
-use std::ops::Add;
-use std::iter::{Iterator, Sum};
+use std::iter::Iterator;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use pyo3::prelude::*;
+use numpy::ToPyArray;
 use hdf5::{Dataset, Error, File};
 use ndarray::{Array1, Array3, ArrayView1, s};
-use indicatif::ProgressIterator;
-use tabled::builder::Builder;
+use numpy::PyArray3;
 use rayon::prelude::{ParallelIterator, IntoParallelIterator, IndexedParallelIterator};
 
-fn main() {
-    let files = ["HIFI00206202.nxs"];
-    let mut results_builder = Builder::new();
-    results_builder.push_record(["File", "Run time (ms)"]);
+// type for python-bound histogram
+type PyHist<'py> = Bound<'py, PyArray3<usize>>;
 
-    for file in files {
-        let avg_time = run_benchmark(file.to_string());
-        results_builder.push_record([file, &avg_time.to_string()]) 
-    }
-    let table = results_builder.build();
-    println!("{}", table)
-}
-
-fn run_benchmark(file: String) -> u128 {
-    let stats: usize = 20;
+#[pyfunction]
+fn calc_histogram<'py>(py: Python<'py>, file: String) -> PyResult<(PyHist<'py>, usize, u128)> {
     let chunk_size: usize = 1048576;
 
     // load file, measuring time taken...
@@ -38,20 +28,15 @@ fn run_benchmark(file: String) -> u128 {
     let periods = Array1::<usize>::zeros(data.n_events);
     let weight = Array1::<usize>::ones(data.n_events);
 
-    let mut avg_time: u128 = 0;
-
     // calculate histograms `stats` times
-    for _ in (0..stats).progress() {
-        let (_, time) = calculate_histograms(
-            data.clone(),
-            n_specs,
-            n_periods,
-            periods.clone(),
-            weight.clone(),
-        );
-        avg_time += time.as_millis();
-    }
-    avg_time / stats as u128
+    let (result, time) = calculate_histograms(
+        data,
+        n_specs,
+        n_periods,
+        periods,
+        weight,
+    );
+    Ok((result.hist.to_pyarray(py), result.n, time.as_millis()))
 }
 
 /// Calculate histograms and output the result and time taken.
@@ -71,6 +56,7 @@ fn calculate_histograms(
         .map(|start| {
             let end = start + min(dataset.chunk_size, dataset.n_events - start);
             let array_slice = s![start..end];
+            unsafe {
             make_histogram(
             dataset.times
                 .read_slice_1d(array_slice)
@@ -87,7 +73,7 @@ fn calculate_histograms(
                 0.016,
                 1e-3,
             )
-        })
+        }})
         .collect();
 
     let final_result = results
@@ -105,19 +91,6 @@ struct Data {
     pub n_events: usize,   // the total number of events
     pub chunk_size: usize, // the size of the data chunks
 }
-
-impl Clone for Data {
-    fn clone(&self) -> Self {
-        Data {
-            times: self.times.clone(),
-            specs: self.specs.clone(),
-            amps: self.amps.clone(),
-            n_events: self.n_events,
-            chunk_size: self.chunk_size,
-        }
-    }
-}
-
 
 fn load_data(filename: &Path, chunk_size: usize) -> Result<Data, Error> {
     let file = File::open(filename)?;
@@ -138,37 +111,44 @@ fn load_data(filename: &Path, chunk_size: usize) -> Result<Data, Error> {
     })
 }
 
-struct HistogramResult {
-    hist: Array3<usize>,
-    n: usize,
+pub struct HistogramResult {
+    pub hist: Array3<usize>,
+    pub n: usize,
 }
 
 /// Make a histogram for a set of data.
-fn make_histogram(
+/// This function is unsafe because we do array indexing without bounds checks!
+unsafe fn make_histogram(
     times: Array1<u32>,
     specs: Array1<u32>,
     n_spec: usize,
     periods: &ArrayView1<usize>,
     n_periods: usize,
     weight: &ArrayView1<usize>,
-    min_time: f64,
-    max_time: f64,
-    width: f64,
-    conversion: f64,
+    min_time: f32,
+    max_time: f32,
+    width: f32,
+    conversion: f32,
 ) -> HistogramResult {
     let mut n: usize = 0;
-    let bins = Array1::<f64>::range(min_time, max_time, width);
-    let mut hist = Array3::<usize>::zeros((n_periods, n_spec, bins.len() - 1));
+    let mut hist = Array3::<usize>::zeros((n_periods, n_spec, ((max_time - min_time)/width).floor() as usize));
 
-    let float_times = Array1::<f64>::from_shape_fn(times.len(), |i| conversion * times[i] as f64);
-    for (k, time) in float_times.into_iter().enumerate() {
-        let w_k = weight[k];
+    for (k, time) in times.into_iter().enumerate() {
+        let t = time as f32 * conversion;
+        let w_k = weight.uget(k);
 
-        if (w_k != 0) && (time >= min_time) && (time <= max_time) {
-            let bin = ((time - min_time) / width).floor() as usize;
-            hist[[periods[k] as usize, specs[k] as usize, bin]] += w_k;
+        if (*w_k != 0) && (t >= min_time) && (t <= max_time) {
+            let bin = ((t - min_time) / width).floor() as usize;
+            hist[[*periods.uget(k) as usize, *specs.uget(k) as usize, bin]] += w_k;
             n += w_k
         }
     }
     HistogramResult { hist, n }
+}
+
+/// A Python module implemented in Rust.
+#[pymodule]
+fn stats(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(calc_histogram, m)?)?;
+    Ok(())
 }
