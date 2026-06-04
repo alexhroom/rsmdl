@@ -41,15 +41,20 @@ fn calc_histogram<'py>(py: Python<'py>, file: String) -> PyResult<(PyHist<'py>, 
 /// Calculate histograms and output the result and time taken.
 fn calculate_histograms(
     dataset: Data,
-    n_specs: usize,
+    n_spec: usize,
     n_periods: usize,
     periods: Array1<usize>,
     weight: Array1<usize>,
 ) -> (HistogramResult, Duration) {
     let time = Instant::now();
 
+    let min_time: f64 = 0.;
+    let max_time: f64 = 32.768;
+    let width: f64 = 0.016;
+    let n_bins = ((max_time - min_time) / width).floor() as usize;
+
     // iterate over the data chunks, make histograms for each, then sum histograms at the end
-    let results: Vec<HistogramResult> = (0..dataset.n_events)
+    let results: HistogramResult = (0..dataset.n_events)
         .into_par_iter()
         .step_by(dataset.chunk_size)
         .map(|start| {
@@ -63,7 +68,7 @@ fn calculate_histograms(
                 dataset.specs
                     .read_slice_1d(array_slice)
                     .expect("Failed to read specs."),
-                n_specs,
+                n_spec,
                 &periods.slice(array_slice),
                 n_periods,
                 &weight.slice(array_slice),
@@ -73,18 +78,14 @@ fn calculate_histograms(
                 1e-3,
             )
         }})
-        .collect();
+        .reduce(|| HistogramResult::new(n_periods, n_spec, n_bins),
+                |mut acc, r| {
+                    acc.hist += &r.hist;
+                    acc.n += &r.n;
+                    acc
+                });
 
-    let final_result = results
-        .into_iter()
-        .reduce(|mut acc, r| {
-            acc.hist += &r.hist;
-            acc.n += &r.n;
-            acc
-        })
-        .unwrap();
-
-    (final_result, time.elapsed())
+    (results, time.elapsed())
 }
 
 struct Data {
@@ -119,6 +120,15 @@ pub struct HistogramResult {
     pub n: usize,
 }
 
+impl HistogramResult {
+    fn new(n_periods: usize, n_spec: usize, n_bins: usize) -> HistogramResult {
+        HistogramResult {
+            hist: Array3::<usize>::zeros((n_periods, n_spec, n_bins)),
+            n: 0
+        }
+    }
+}
+
 /// Make a histogram for a set of data.
 /// This function is unsafe because we do array indexing without bounds checks!
 unsafe fn make_histogram(
@@ -133,8 +143,7 @@ unsafe fn make_histogram(
     width: f32,
     conversion: f32,
 ) -> HistogramResult {
-    let mut n: usize = 0;
-    let mut hist = Array3::<usize>::zeros((n_periods, n_spec, ((max_time - min_time)/width).floor() as usize));
+    let mut result = HistogramResult::new(n_periods, n_spec, ((max_time - min_time)/width).floor() as usize);
 
     for (k, time) in times.into_iter().enumerate() {
         let t = time as f32 * conversion;
@@ -142,11 +151,11 @@ unsafe fn make_histogram(
 
         if (*w_k != 0) && (t >= min_time) && (t <= max_time) {
             let bin = ((t - min_time) / width).floor() as usize;
-            hist[[*periods.uget(k) as usize, *specs.uget(k) as usize, bin]] += w_k;
-            n += w_k
+            result.hist[[*periods.uget(k) as usize, *specs.uget(k) as usize, bin]] += w_k;
+            result.n += w_k
         }
     }
-    HistogramResult { hist, n }
+    result 
 }
 
 /// A Python module implemented in Rust.
