@@ -3,29 +3,97 @@ use std::iter::Iterator;
 use std::time::{Duration, Instant};
 
 use ndarray::{s, Array1, Array3, ArrayView1};
+use numpy::{PyArray3, ToPyArray};
+use pyo3::prelude::{pyclass, pymethods, Bound, PyResult};
 use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 use crate::data::Data;
-use crate::filters::Weights;
+use crate::filters::{get_good_values, Weights};
+
+type PyHist<'py> = Bound<'py, PyArray3<usize>>;
+
+#[pyclass(frozen)]
+pub struct Histogram {
+    pub min_time: f32,
+    pub max_time: f32,
+    pub n_bins: usize,
+    pub hist: Array3<usize>,
+    pub n: usize,
+}
+
+#[pymethods]
+impl Histogram {
+    #[new]
+    fn new(min_time: f32, max_time: f32, n_bins: usize) -> Histogram {
+        Histogram {
+            min_time,
+            max_time,
+            n_bins,
+            hist: Array3::zeros((1, 1, 1)),
+            n: 0,
+        }
+    }
+
+    fn data<'py>(slf: &Bound<'py, Histogram>) -> PyResult<PyHist<'py>> {
+        let py = slf.py();
+        Ok(slf.borrow().hist.to_pyarray(py))
+    }
+
+    fn n_events(&self) -> PyResult<usize> {
+        Ok(self.n)
+    }
+
+    // todo: change n_filters to a proper Filters object
+    fn calculate(&self, data: Data, n_filters: usize) -> PyResult<(Histogram, u128)> {
+        let periods: Array1<u32> = match &data.periods {
+            //Some(dataset) => dataset.read_1d().expect("Failed to read period data."),
+            Some(dataset) => Array1::zeros(data.n_events),
+            None => Array1::zeros(data.n_events),
+        };
+        let n_periods: usize = periods.iter().max().unwrap().clone() as usize + 1;
+
+        // currently, filter out every other frame for testing
+        let weights = match n_filters > 0 {
+            true => {
+                let f_starts = (0..).step_by(2).take(n_filters).collect();
+                let f_ends = (1..).step_by(2).take(n_filters).collect();
+                let frame_step = data.n_events / (2 * n_filters);
+                let frame_starts = (0..=n_filters * 2).map(|n| n * frame_step).collect();
+                get_good_values(f_starts, f_ends, frame_starts, data.n_events)
+            }
+            false => Weights::ones(data.n_events),
+        };
+
+        let (result, time) = calculate_histograms(
+            data,
+            self.min_time,
+            self.max_time,
+            self.n_bins,
+            n_periods,
+            periods,
+            weights,
+        );
+        Ok((result, time.as_millis()))
+    }
+}
 
 /// Calculate histograms and output the result and time taken.
 #[inline(always)]
 pub fn calculate_histograms(
     dataset: Data,
-    n_spec: usize,
+    min_time: f32,
+    max_time: f32,
+    n_bins: usize,
     n_periods: usize,
-    periods: Array1<usize>,
+    periods: Array1<u32>,
     weights: Weights,
-) -> (HistogramResult, Duration) {
+) -> (Histogram, Duration) {
     let time = Instant::now();
 
-    let min_time: f64 = 0.;
-    let max_time: f64 = 32.768;
-    let width: f64 = 0.016;
-    let n_bins = ((max_time - min_time) / width).floor() as usize;
+    let width: f64 = (max_time - min_time) as f64 / n_bins as f64;
 
     // iterate over the data chunks, make histograms for each, then sum histograms at the end
-    let results: HistogramResult = (0..dataset.n_events)
+    let results: Histogram = (0..dataset.n_events)
         .into_par_iter()
         .step_by(dataset.chunk_size)
         .map(|start| {
@@ -41,19 +109,25 @@ pub fn calculate_histograms(
                         .specs
                         .read_slice_1d(array_slice)
                         .expect("Failed to read specs."),
-                    n_spec,
+                    dataset.n_spec,
                     &periods.slice(array_slice),
                     n_periods,
                     weights.slice(start, end),
-                    0.,
-                    32.768,
-                    0.016,
+                    min_time,
+                    max_time,
+                    n_bins,
+                    width,
                     1e-3,
                 )
             }
         })
         .reduce(
-            || HistogramResult::new(n_periods, n_spec, n_bins),
+            || {
+                // rayon's reduce requires to initialise a value...
+                let mut h = Histogram::new(min_time, max_time, n_bins);
+                h.hist = Array3::zeros((n_periods, dataset.n_spec, n_bins));
+                h
+            },
             |mut acc, r| {
                 acc.hist += &r.hist;
                 acc.n += &r.n;
@@ -64,20 +138,6 @@ pub fn calculate_histograms(
     (results, time.elapsed())
 }
 
-pub struct HistogramResult {
-    pub hist: Array3<usize>,
-    pub n: usize,
-}
-
-impl HistogramResult {
-    fn new(n_periods: usize, n_spec: usize, n_bins: usize) -> HistogramResult {
-        HistogramResult {
-            hist: Array3::<usize>::zeros((n_periods, n_spec, n_bins)),
-            n: 0,
-        }
-    }
-}
-
 /// Make a histogram for a set of data.
 /// This function is unsafe because we do array indexing without bounds checks!
 #[inline(always)]
@@ -85,26 +145,24 @@ unsafe fn make_histogram(
     times: Array1<u32>,
     specs: Array1<u32>,
     n_spec: usize,
-    periods: &ArrayView1<usize>,
+    periods: &ArrayView1<u32>,
     n_periods: usize,
     weights: Weights,
     min_time: f32,
     max_time: f32,
-    width: f32,
+    n_bins: usize,
+    width: f64,
     conversion: f32,
-) -> HistogramResult {
-    let mut result = HistogramResult::new(
-        n_periods,
-        n_spec,
-        ((max_time - min_time) / width).floor() as usize,
-    );
+) -> Histogram {
+    let mut result = Histogram::new(min_time, max_time, n_bins);
+    result.hist = Array3::zeros((n_periods, n_spec, n_bins));
 
     for (k, time) in times.into_iter().enumerate() {
         let t = time as f32 * conversion;
         let w_k = weights[k];
 
         if w_k && (t >= min_time) && (t <= max_time) {
-            let bin = ((t - min_time) / width).floor() as usize;
+            let bin = ((t - min_time) / width as f32).floor() as usize;
             result.hist[[*periods.uget(k) as usize, *specs.uget(k) as usize, bin]] += 1;
             result.n += 1
         }
@@ -134,6 +192,7 @@ mod tests {
                 weights,
                 0.,
                 3.,
+                3,
                 1.,
                 1e-3,
             );
@@ -163,6 +222,7 @@ mod tests {
                 weights.into_iter().into(),
                 0.,
                 3.,
+                3,
                 1.,
                 1e-3,
             );

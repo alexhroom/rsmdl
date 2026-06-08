@@ -1,13 +1,30 @@
 use crate::filters::weights::Weights;
 
+/// Assuming the data is sorted, get which frames the filters belong to.
+fn get_indices(
+    start_times: &[usize],
+    filter_starts: Vec<usize>,
+    filter_ends: Vec<usize>,
+) -> (Vec<usize>, Vec<usize>) {
+    let n_filters = filter_starts.len();
+    (
+        (0..n_filters)
+            .map(|j| start_times.binary_search(&filter_starts[j]).unwrap())
+            .collect(),
+        (0..n_filters)
+            .map(|j| start_times.binary_search(&filter_ends[j]).unwrap())
+            .collect(),
+    )
+}
+
 /// Get a weights array corresponding to the filtered frames.
 ///
 /// Parameters
 /// ----------
 /// f_start: Vec<usize>
-///     The start frames indices for the filters.
+///     The lower bounding frame number for each filter.
 /// f_end: Vec<usize>
-///     The end frame indices for the filters.
+///     The upper bounding frame number for each filter.
 /// start_index: Vec<usize>
 ///     A list of the first indices for each frame.
 /// array_len: usize

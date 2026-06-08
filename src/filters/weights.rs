@@ -1,4 +1,4 @@
-use std::cmp::{max, min};
+use std::cmp::max;
 /// Class representation of an array of binary weights as a string of bits,
 /// stored in 64-bit chunks.
 ///

@@ -4,41 +4,53 @@ use hdf5::{Dataset, Error, File};
 use pyo3::prelude::{pyclass, pymethods};
 
 /// Class for storing a Nexus event file.
-#[pyclass(frozen)]
+#[pyclass]
 #[derive(Clone)]
 pub struct Data {
-    pub times: Dataset,
     pub specs: Dataset,
+    pub times: Dataset,
     pub amps: Dataset,
+    pub frames: Dataset,
+    pub frame_times: Dataset,
+    pub periods: Option<Dataset>,
     pub n_events: usize,   // the total number of events
+    pub n_spec: usize,     // the number of detectors
     pub chunk_size: usize, // the size of the data chunks
 }
 
 #[pymethods]
 impl Data {
     #[new]
-    #[pyo3(signature = (filename, chunk_size=1048576))]
-    fn new(filename: String, chunk_size: usize) -> Self {
+    #[pyo3(signature = (filename, n_spec, chunk_size=1048576))]
+    fn new(filename: String, n_spec: usize, chunk_size: usize) -> Self {
         let path = Path::new(&filename);
-        load_data(path, chunk_size).expect("Failed to load data!")
+        load_data(path, n_spec, chunk_size).expect("Failed to load data!")
     }
 }
 
-pub fn load_data(filename: &Path, chunk_size: usize) -> Result<Data, Error> {
+pub fn load_data(filename: &Path, n_spec: usize, chunk_size: usize) -> Result<Data, Error> {
     let file = File::open(filename)?;
     let data = file.group("raw_data_1")?.group("detector_1_events")?;
 
-    let times = data.dataset("event_time_offset")?;
     let specs = data.dataset("event_id")?;
+    let times = data.dataset("event_time_offset")?;
     let amps = data.dataset("pulse_height")?;
+
+    let frames = data.dataset("event_index")?;
+    let frame_times = data.dataset("event_time_zero")?;
+    let periods = data.dataset("period_number").ok();
 
     let n_events = specs.size();
 
     Ok(Data {
-        times,
         specs,
+        times,
         amps,
+        frames,
+        frame_times,
+        periods,
         n_events,
+        n_spec,
         chunk_size,
     })
 }
