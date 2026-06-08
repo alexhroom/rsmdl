@@ -1,19 +1,23 @@
 import time
 
-from rsmdl import calc_histogram, Data
+from rsmdl import Histogram, Data
 
 files = [f"SIM0000000{n}.nxs" for n in range(1,4)]
 
 stats = 1
 n_filters = 0
+n_spec = 960
+
 for file in files:
     print("\nFile: ", file)
-    data = Data(file)
+    data = Data(file, 960)
     avg_calc_time = 0
     avg_run_time = 0
     for _ in range(0, stats):
         start_time = time.time()
-        hist, n, calc_time = calc_histogram(data, n_filters)
+        histogram = Histogram(0., 32.768, 2048)
+        result, calc_time = histogram.calculate(data, n_filters)
+        n = result.n_events()
         duration = time.time() - start_time
         avg_run_time += duration
         avg_calc_time += calc_time 
