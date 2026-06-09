@@ -1,10 +1,12 @@
 use std::path::Path;
 
 use hdf5::{Dataset, Error, File};
+use numpy::{PyArray1, ToPyArray};
 use pyo3::prelude::{pyclass, pymethods};
+use pyo3::prelude::{Bound, PyResult};
 
 /// Class for storing a Nexus event file.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct Data {
     pub specs: Dataset,
@@ -25,6 +27,12 @@ impl Data {
     fn new(filename: String, n_spec: usize, chunk_size: usize) -> Self {
         let path = Path::new(&filename);
         load_data(path, n_spec, chunk_size).expect("Failed to load data!")
+    }
+
+    /// used for testing
+    fn get_frame_times<'py>(slf: &Bound<'py, Data>) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        let py = slf.py();
+        Ok(slf.borrow().frame_times.read_1d().unwrap().to_pyarray(py))
     }
 }
 

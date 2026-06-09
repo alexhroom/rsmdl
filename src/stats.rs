@@ -8,7 +8,7 @@ use pyo3::prelude::{pyclass, pymethods, Bound, PyResult};
 use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 use crate::data::Data;
-use crate::filters::{get_good_values, Weights};
+use crate::filters::{get_good_values, get_indices, Filters, Weights};
 
 type PyHist<'py> = Bound<'py, PyArray3<usize>>;
 
@@ -29,7 +29,7 @@ impl Histogram {
             min_time,
             max_time,
             n_bins,
-            hist: Array3::zeros((1, 1, 1)),
+            hist: Array3::zeros((0, 0, 0)),
             n: 0,
         }
     }
@@ -44,24 +44,31 @@ impl Histogram {
     }
 
     // todo: change n_filters to a proper Filters object
-    fn calculate(&self, data: Data, n_filters: usize) -> PyResult<(Histogram, u128)> {
+    fn calculate(&self, data: Data, filters: Filters) -> PyResult<(Histogram, u128)> {
         let periods: Array1<u32> = match &data.periods {
             //Some(dataset) => dataset.read_1d().expect("Failed to read period data."),
             Some(dataset) => Array1::zeros(data.n_events),
             None => Array1::zeros(data.n_events),
         };
-        let n_periods: usize = periods.iter().max().unwrap().clone() as usize + 1;
+        let n_periods: usize = *periods.iter().max().unwrap() as usize + 1;
 
-        // currently, filter out every other frame for testing
-        let weights = match n_filters > 0 {
-            true => {
-                let f_starts = (0..).step_by(2).take(n_filters).collect();
-                let f_ends = (1..).step_by(2).take(n_filters).collect();
-                let frame_step = data.n_events / (2 * n_filters);
-                let frame_starts = (0..=n_filters * 2).map(|n| n * frame_step).collect();
-                get_good_values(f_starts, f_ends, frame_starts, data.n_events)
-            }
-            false => Weights::ones(data.n_events),
+        let filter_starts = filters.get_time_filter_starts();
+        let filter_ends = filters.get_time_filter_ends();
+        let start_index: Array1<usize> = data.frames.read_1d().expect("Failed to read frame data!");
+        let frame_start_times: Array1<usize> = data.frame_times.read_1d().unwrap();
+
+        let weights = if filter_starts.is_empty() {
+            Weights::ones(data.n_events)
+        } else {
+            let (start_frames, end_frames) =
+                get_indices(&frame_start_times, filter_starts, filter_ends);
+            get_good_values(
+                start_frames,
+                end_frames,
+                start_index,
+                data.n_events,
+                filters.is_include(),
+            )
         };
 
         let (result, time) = calculate_histograms(

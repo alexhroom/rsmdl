@@ -37,6 +37,9 @@ impl Weights {
         }
     }
 
+    // this method is used to create expected weights vectors for unit tests,
+    // but is not used in the actual code
+    #[cfg(test)]
     /// Create a weights array from a raw weight vector.
     pub fn from_raw(raw_weights: Vec<u64>) -> Self {
         Weights {
